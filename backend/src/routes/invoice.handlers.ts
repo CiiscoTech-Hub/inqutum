@@ -35,6 +35,10 @@ import type { VerificationCode } from '../services/payment-verification';
 /** Kept explicit so clients can tune polling without duplicating backend policy. */
 export const PAYMENT_STATUS_POLL_INTERVAL_MS = 3000;
 
+/** Invoice list page size bounds; the effective value is echoed in `pagination.limit`. */
+export const DEFAULT_INVOICE_PAGE_LIMIT = 50;
+export const MAX_INVOICE_PAGE_LIMIT = 200;
+
 /** Only the part of the Stellar service the verify handler needs. */
 export interface TransactionLookup {
   getTransaction(txHash: string): Promise<any>;
@@ -342,7 +346,11 @@ export function createInvoiceHandlers(options: InvoiceHandlerOptions): InvoiceHa
           return sendFailure(res, 400, invalid.message, { code: invalid.code, correlationId: corrId });
         }
 
-        const limit = toPositiveInt(req.query.limit, 50);
+        // Clamped so a page is never empty-but-"hasMore" (limit=0) or unbounded.
+        const limit = Math.min(
+          Math.max(toPositiveInt(req.query.limit, DEFAULT_INVOICE_PAGE_LIMIT), 1),
+          MAX_INVOICE_PAGE_LIMIT
+        );
         // A cursor fully positions the page; offset only applies to legacy offset paging.
         const offset = after ? 0 : toPositiveInt(req.query.offset, 0);
 

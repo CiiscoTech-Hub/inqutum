@@ -92,6 +92,13 @@ which is also logged — quote it in a bug report.
 | `admin` | `Authorization: Bearer <JOBS_ADMIN_TOKEN>`. Compared with `timingSafeEqual`. Absent token → 401, disabled route → 403. |
 | `hmac` | Signed request body plus a timestamp header, verified against `WEBHOOK_SIGNING_SECRET` with a 5-minute tolerance and a replay window. Missing headers → 400 `MALFORMED_WEBHOOK`; stale timestamp → 408 `STALE_TIMESTAMP`; bad signature → 401 `INVALID_SIGNATURE`; replayed event id → 409 `DUPLICATE_EVENT`. |
 
+Sensitive admin actions (`PUT /api/ops/config/feature-flags/:flag`) need the
+`admin` bearer **and** an `X-Capability-Token` from `POST /api/ops/capabilities`:
+short-lived, single-use, scoped to one action and target. Missing, malformed,
+forged or expired → 401; wrong scope → 403; already used or in flight → 409.
+Without `CAPABILITY_TOKEN_SECRET` these routes return 403
+`CAPABILITIES_DISABLED`. See [CAPABILITY_TOKENS.md](CAPABILITY_TOKENS.md).
+
 > **Known gap.** The public invoice surface authenticates by wallet key rather
 > than by a session, and the `/api/email/*` routes have no auth middleware. Both
 > are recorded here as contract facts rather than hidden; they need a decision
@@ -102,18 +109,23 @@ which is also logged — quote it in a bug report.
 
 ## Pagination
 
-List endpoints accept `limit` and `offset`, and prefer keyset pagination via
-`after` (see `docs/PAGINATION.md`). `offset` is retained for older clients and
-is unstable while invoices are being inserted.
+`GET /api/invoices` accepts `limit` and `offset`, and prefers keyset pagination
+via `cursor` (see `docs/PAGINATION.md`). `offset` is retained for older clients
+and is unstable while invoices are being inserted. `limit` defaults to 50 and is
+clamped to 1–200; the effective value is echoed in `pagination.limit`.
 
 The response carries a `pagination` block:
 
 ```json
-{ "limit": 50, "offset": 0, "total": 128, "nextCursor": "2026-09-27T09:00:00.000Z|0f1c…", "hasMore": true }
+{ "limit": 50, "offset": 0, "total": 50, "nextCursor": "MjAyNi0wOS0yN1QwOTowMDowMC4wMDBafDBmMWM…", "hasMore": true }
 ```
 
-`nextCursor` is `null` on the last page. `total` is the count of records
-matching the filter, not the page size.
+`nextCursor` is an opaque base64url string, `null` on the last page, and
+`hasMore` is always `nextCursor !== null`. On the invoice list `total` is the
+number of rows on **this page**. On `GET /api/audit/events` `total` is the count
+of events matching the filter, `limit` is clamped to 1–500 and there is no
+cursor. These semantics are pinned by
+`backend/tests/pagination-authorization-contract.test.ts`.
 
 ## Endpoints
 
@@ -125,7 +137,7 @@ matching the filter, not the page size.
 | `GET` | `/api/health` | none | 200 | Liveness plus the storage mode the server is running in. |
 | `GET` | `/api/ready` | none | 200, 503 | Readiness probe. 503 when a dependency is unavailable. |
 | `POST` | `/api/invoices` | none | 201, 400 | Create an invoice. 201 returns the stored invoice. |
-| `GET` | `/api/invoices` | none | 200, 400, 500 | List invoices for a seller. Keyset pagination via `after`. |
+| `GET` | `/api/invoices` | none | 200, 400, 500 | List invoices for a seller. Keyset pagination via `cursor`; `limit` clamped to 1-200. |
 | `GET` | `/api/invoices/stats` | none | 200, 400, 500 | Aggregated counts and revenue per asset for a seller. |
 | `GET` | `/api/invoices/:id` | none | 200, 404, 500 | Fetch one invoice by id. |
 | `GET` | `/api/invoices/:id/payment-info` | none | 200, 404, 500 | Payment details needed to settle an invoice (asset, memo, destination). |
@@ -174,6 +186,22 @@ matching the filter, not the page size.
 | `POST` | `/api/ops/stale-projections/repair` | `admin` | 200, 401, 403 | Automate repair recommendations for detected projection drift. |
 | `POST` | `/api/ops/synthetic-journey/run` | `admin` | 200, 401, 403, 503 | Run synthetic journey monitor across critical workflow with latency and dependency blame. |
 | `POST` | `/api/ops/snapshot-restore/verify` | `admin` | 200, 401, 403, 422 | Verify snapshot restore package against data invariants and rebuild derived indexes. |
+| `POST` | `/api/ops/policy/dry-run` | `admin` | 200, 400, 401, 403, 503 | Dry-run a validated policy proposal: totals plus a paginated preview of affected records. |
+| `POST` | `/api/ops/capabilities` | `admin` | 201, 400, 401, 403 | Issue an expiring, single-use capability token for one sensitive action on one target. |
+| `GET` | `/api/ops/config` | `admin` | 200, 401, 403 | Effective runtime configuration, its version and the source of each value. |
+| `PUT` | `/api/ops/config/feature-flags/:flag` | `admin` + capability | 200, 400, 401, 403, 404, 409, 503 | Set or clear a feature-flag override. Writes audit evidence first. |
+| `GET` | `/api/ops/dependencies/matrix` | `admin` | 200, 401, 403 | External dependency degradation matrix and its validation problems. |
+| `GET` | `/api/ops/dependencies` | `admin` | 200, 401, 403, 503 | Probe every external dependency. 503 when the overall state is down. |
+| `GET` | `/api/ops/partial-failures` | `admin` | 200, 400, 401, 403 | Partial-failure dashboard over background jobs, filterable. |
+| `GET` | `/api/ops/partial-failures/:id` | `admin` | 200, 401, 403, 404 | Inspect one partially failed operation. |
+| `POST` | `/api/ops/partial-failures/:id/retry` | `admin` | 200, 401, 403, 404, 409, 422, 503 | Idempotently retry a partially failed operation. |
+| `POST` | `/api/ops/intents` | `admin` | 201, 400, 401, 403 | Declare a signed, risk-scored intent for a high-impact maintainer action. |
+| `GET` | `/api/ops/intents` | `admin` | 200, 401, 403 | List maintainer intents, optionally by status. |
+| `POST` | `/api/ops/intents/:id/approve` | `admin` | 200, 400, 401, 403, 404, 409, 410 | Second-maintainer approval of a pending intent. |
+| `POST` | `/api/ops/intents/:id/reject` | `admin` | 200, 401, 403, 404, 409, 410 | Reject an intent and issue a signed receipt. |
+| `POST` | `/api/ops/intents/:id/execute` | `admin` | 200, 400, 401, 403, 404, 409, 410, 501, 502 | Execute an intent with its confirmation phrase. 502 when the action itself failed. |
+| `GET` | `/api/ops/receipts` | `admin` | 200, 401, 403 | Signed intent receipts plus the first broken chain index. |
+| `GET` | `/api/ops/receipts/:id` | `admin` | 200, 401, 403, 404 | One intent receipt with its signature check. |
 | `POST` | `/api/webhooks/incoming` | `hmac` (conditional) | 200, 400, 401, 408, 409 | Signed inbound webhook receiver. Rejects unsigned, stale and replayed events. |
 
 `/api/webhooks/incoming` is mounted only when `WEBHOOK_SIGNING_SECRET` is set.

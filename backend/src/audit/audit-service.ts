@@ -23,7 +23,9 @@ export type AuditAction =
   | 'IMPERSONATION_ENDED'
   | 'IMPERSONATION_EXPIRED'
   | 'IMPERSONATION_ACTION_ALLOWED'
-  | 'IMPERSONATION_ACTION_BLOCKED';
+  | 'IMPERSONATION_ACTION_BLOCKED'
+  | 'CAPABILITY_ISSUED'
+  | 'CONFIG_CHANGED';
 
 export type AuditActorType = 'seller' | 'payer' | 'system' | 'maintainer';
 
@@ -35,7 +37,7 @@ export interface AuditActor {
 }
 
 export interface AuditScope {
-  entityType: 'invoice' | 'system' | 'stellar';
+  entityType: 'invoice' | 'system' | 'stellar' | 'config';
   entityId: string;
 }
 
