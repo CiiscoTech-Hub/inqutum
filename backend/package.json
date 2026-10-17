@@ -8,6 +8,7 @@
     "dev:pg": "tsx watch src/server.ts",
     "dev:mvp": "tsx watch src/server-mvp.ts",
     "test": "node --import tsx --test tests/*.test.ts tests/isolated/*.test.js",
+    "test:redaction": "node --import tsx --test tests/redaction.test.ts",
     "test:pg": "node --import tsx --test tests/invoice-postgres.integration.test.ts",
     "test:isolated": "node --test tests/isolated/*.test.js",
     "build": "tsc",

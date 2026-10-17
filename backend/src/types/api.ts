@@ -5,6 +5,7 @@ import {
   DOMAIN_ERROR_TAXONOMY,
   classifyError,
 } from '../errors/error-taxonomy';
+import { redactErrorMessage } from '../security/redaction';
 
 // Shared response envelope used by both the MVP and the Postgres server.
 // Both servers send the same success/failure shape so clients stay
@@ -81,7 +82,7 @@ export function apiFailure(
 
   return {
     success: false,
-    error,
+    error: redactErrorMessage(error),
     ...(code ? { code: code as VerificationCode } : {}),
     category: extra?.category || taxonomy?.category,
     retryable: extra?.retryable !== undefined ? extra.retryable : taxonomy?.retryable,
@@ -151,7 +152,7 @@ export function sendVerificationFailure(
   res.status(status).json({
     success: false,
     code,
-    error,
+    error: redactErrorMessage(error),
     ...(taxonomy
       ? {
           category: taxonomy.category,
