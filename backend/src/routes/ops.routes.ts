@@ -42,6 +42,12 @@ import {
   ReplayInProgressError,
   UnknownProjectorVersionError,
 } from '../ops/projection-replay';
+import {
+  ResumableRepairService,
+  RepairJobNotFoundError,
+  type RepairPhase,
+} from '../ops/resumable-repair.service';
+import { pool } from '../config/database';
 
 export interface OpsRouterOptions {
   storage: InvoiceStorage;
@@ -66,6 +72,8 @@ export interface OpsRouterOptions {
   adminConfig?: AdminConfigService;
   /** Search-index event replay (#290). Defaults to the live index and audit trail. */
   replay?: ProjectionReplayService;
+  /** Resumable record repair service for orphaned and inconsistent records. */
+  repairService?: ResumableRepairService;
 }
 
 function defaultApprovals(): MaintainerApprovalService | null {
@@ -120,6 +128,7 @@ export function createOpsRouter(options: OpsRouterOptions): Router {
       index: defaultSearchIndex,
       events: () => auditStore.listChronological(),
     });
+  const repairService = options.repairService ?? new ResumableRepairService({ db: pool });
 
   if (approvals && options.jobs) {
     const jobs = options.jobs;
@@ -493,6 +502,96 @@ export function createOpsRouter(options: OpsRouterOptions): Router {
       };
       const report = verifySnapshotRestore(snapshotPkg);
       res.status(report.ok ? 200 : 422).json({ success: report.ok, data: report, correlationId: req.correlationId });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // -- Resumable record repair jobs -----------------------------------------
+
+  router.post('/ops/repair-records/jobs', admin, async (req, res, next) => {
+    try {
+      const { dryRun, batchSize, phases, maxBatches } = req.body ?? {};
+      const report = await repairService.startRepairJob({
+        dryRun: dryRun !== undefined ? Boolean(dryRun) : undefined,
+        batchSize: typeof batchSize === 'number' ? batchSize : undefined,
+        phases: Array.isArray(phases) ? (phases as RepairPhase[]) : undefined,
+        maxBatches: typeof maxBatches === 'number' ? maxBatches : undefined,
+      });
+
+      auditStore.recordEvent({
+        action: 'MAINTAINER_ACTION',
+        actor: { type: 'maintainer', id: 'ops-admin' },
+        scope: { entityType: 'system', entityId: report.jobId },
+        reason: `Record repair job started (${report.status})`,
+        metadata: {
+          jobId: report.jobId,
+          status: report.status,
+          dryRun: report.dryRun,
+          repaired: report.counts.repaired,
+          scanned: report.counts.scanned,
+          failed: report.counts.failed,
+        },
+        correlationId: req.correlationId,
+      });
+
+      res.status(201).json({ success: true, data: report, correlationId: req.correlationId });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post('/ops/repair-records/jobs/:id/resume', admin, async (req, res, next) => {
+    try {
+      const { batchSize, maxBatches } = req.body ?? {};
+      const report = await repairService.resumeRepairJob(req.params.id, {
+        batchSize: typeof batchSize === 'number' ? batchSize : undefined,
+        maxBatches: typeof maxBatches === 'number' ? maxBatches : undefined,
+      });
+
+      auditStore.recordEvent({
+        action: 'MAINTAINER_ACTION',
+        actor: { type: 'maintainer', id: 'ops-admin' },
+        scope: { entityType: 'system', entityId: report.jobId },
+        reason: `Record repair job resumed (${report.status})`,
+        metadata: {
+          jobId: report.jobId,
+          status: report.status,
+          dryRun: report.dryRun,
+          repaired: report.counts.repaired,
+          scanned: report.counts.scanned,
+          failed: report.counts.failed,
+        },
+        correlationId: req.correlationId,
+      });
+
+      res.json({ success: true, data: report, correlationId: req.correlationId });
+    } catch (err) {
+      if (err instanceof RepairJobNotFoundError) {
+        return fail(res, req, 404, 'REPAIR_JOB_NOT_FOUND', err.message);
+      }
+      next(err);
+    }
+  });
+
+  router.get('/ops/repair-records/jobs/:id', admin, async (req, res, next) => {
+    try {
+      const report = await repairService.getJob(req.params.id);
+      if (!report) {
+        return fail(res, req, 404, 'REPAIR_JOB_NOT_FOUND', `Repair job ${req.params.id} not found`);
+      }
+      res.json({ success: true, data: report, correlationId: req.correlationId });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.get('/ops/repair-records/jobs', admin, async (req, res, next) => {
+    try {
+      const status = typeof req.query.status === 'string' ? (req.query.status as any) : undefined;
+      const limit = typeof req.query.limit === 'string' ? parseInt(req.query.limit, 10) : undefined;
+      const jobs = await repairService.listJobs({ status, limit });
+      res.json({ success: true, data: jobs, correlationId: req.correlationId });
     } catch (err) {
       next(err);
     }
