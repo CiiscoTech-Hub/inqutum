@@ -6,6 +6,7 @@
  */
 
 import { VerificationCode, VERIFICATION_MESSAGES } from '../services/payment-verification';
+import { redactErrorMessage, sanitizeObject } from '../security/redaction';
 
 export type ErrorCategory =
   | 'VALIDATION'
@@ -364,6 +365,7 @@ export function buildUserSafeErrorResponse(
   recoveryAction: string;
   correlationId?: string;
   timestamp: string;
+  details?: any;
 } {
   const classified = classifyError(error);
 
@@ -374,6 +376,8 @@ export function buildUserSafeErrorResponse(
     userMessage = error.message;
   }
 
+  userMessage = redactErrorMessage(userMessage);
+
   return {
     success: false,
     error: userMessage,
@@ -382,6 +386,7 @@ export function buildUserSafeErrorResponse(
     retryable: classified.retryable,
     recoveryAction: classified.recoveryAction,
     ...(correlationId ? { correlationId } : {}),
+    ...(error?.details ? { details: sanitizeObject(error.details) } : {}),
     timestamp: new Date().toISOString(),
   };
 }

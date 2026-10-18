@@ -20,6 +20,7 @@
 
 import { Request, Response, NextFunction } from 'express';
 import { performance } from 'perf_hooks';
+import { sanitizeObject } from '../security/redaction';
 
 // Extend Express Request interface to carry correlationId & startTime
 declare global {
@@ -47,53 +48,12 @@ export interface StructuredLogEntry {
   metadata?: Record<string, any>;
 }
 
-// Regex patterns for sensitive value detection and redaction
-const SECRET_KEY_PATTERN = /\bS[A-Z0-9]{55}\b/g;
-const BEARER_TOKEN_PATTERN = /Bearer\s+([A-Za-z0-9\-._~+/]+=*)/gi;
-const PRIVATE_KEY_BLOCK_PATTERN = /-----BEGIN [A-Z ]*PRIVATE KEY-----[^-]+-----END [A-Z ]*PRIVATE KEY-----/g;
-const PASSWORD_FIELD_PATTERN = /"?(password|secret|apiKey|api_secret|auth_token)"?\s*:\s*"[^"]+"/gi;
-
 /**
  * Recursively sanitize an object or string, masking sensitive cryptographic secrets
  * and credentials while preserving public identifiers (G-addresses, tx hashes, invoice IDs).
  */
 export function sanitizeForLogging(data: any): any {
-  if (data === null || data === undefined) {
-    return data;
-  }
-
-  if (typeof data === 'string') {
-    return data
-      .replace(SECRET_KEY_PATTERN, 'S[REDACTED_SECRET_KEY]')
-      .replace(BEARER_TOKEN_PATTERN, 'Bearer [REDACTED_TOKEN]')
-      .replace(PRIVATE_KEY_BLOCK_PATTERN, '[REDACTED_PRIVATE_KEY]')
-      .replace(PASSWORD_FIELD_PATTERN, '"$1":"[REDACTED]"');
-  }
-
-  if (Array.isArray(data)) {
-    return data.map(sanitizeForLogging);
-  }
-
-  if (typeof data === 'object') {
-    const sanitized: Record<string, any> = {};
-    for (const [key, value] of Object.entries(data)) {
-      const lowerKey = key.toLowerCase();
-      if (
-        lowerKey.includes('secret') ||
-        lowerKey.includes('password') ||
-        lowerKey.includes('authorization') ||
-        lowerKey.includes('privatekey') ||
-        lowerKey.includes('token')
-      ) {
-        sanitized[key] = '[REDACTED]';
-      } else {
-        sanitized[key] = sanitizeForLogging(value);
-      }
-    }
-    return sanitized;
-  }
-
-  return data;
+  return sanitizeObject(data);
 }
 
 /**
