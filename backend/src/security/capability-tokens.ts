@@ -86,7 +86,9 @@ export type CapabilityErrorCode =
   | 'CAPABILITY_SCOPE_MISMATCH'
   | 'CAPABILITY_IN_USE'
   | 'CAPABILITY_ALREADY_USED'
-  | 'CAPABILITY_LEDGER_FULL';
+  | 'CAPABILITY_LEDGER_FULL'
+  | 'CAPABILITY_REVOKED'
+  | 'CAPABILITY_SUBJECT_REVOKED';
 
 const HTTP_STATUS: Record<CapabilityErrorCode, number> = {
   CAPABILITY_REQUEST_INVALID: 400,
@@ -99,6 +101,8 @@ const HTTP_STATUS: Record<CapabilityErrorCode, number> = {
   CAPABILITY_IN_USE: 409,
   CAPABILITY_ALREADY_USED: 409,
   CAPABILITY_LEDGER_FULL: 503,
+  CAPABILITY_REVOKED: 401,
+  CAPABILITY_SUBJECT_REVOKED: 401,
 };
 
 export class CapabilityError extends Error {
@@ -132,6 +136,10 @@ type LedgerEntry = { state: 'reserved' | 'used'; exp: number };
 
 export class CapabilityTokenService {
   private readonly ledger = new Map<string, LedgerEntry>();
+  /** Revoked token ids are retained only until their signed expiry. */
+  private readonly revokedIds = new Map<string, number>();
+  /** Subject cutoffs invalidate all capabilities issued at or before the cutoff. */
+  private readonly revokedSubjects = new Map<string, { cutoff: number; expiresAt: number }>();
   private readonly now: () => Date;
   private readonly capacity: number;
 
@@ -217,7 +225,47 @@ export class CapabilityTokenService {
     if (claims.action !== scope.action || claims.target !== scope.target) {
       throw new CapabilityError('CAPABILITY_SCOPE_MISMATCH', `Capability is for ${claims.action} on "${claims.target}", not ${scope.action} on "${scope.target}"`);
     }
+    this.pruneRevocations(now);
+    if (this.revokedIds.has(claims.id)) {
+      throw new CapabilityError('CAPABILITY_REVOKED', 'Capability was revoked after a security event; issue a new one');
+    }
+    const subjectRevocation = this.revokedSubjects.get(claims.subject);
+    if (subjectRevocation !== undefined && claims.iat <= subjectRevocation.cutoff) {
+      throw new CapabilityError('CAPABILITY_SUBJECT_REVOKED', 'Capabilities for this subject were revoked after a security event; issue a new one');
+    }
     return claims;
+  }
+
+  /** Revoke one already-authenticated capability after a security event. */
+  revokeCapability(claims: CapabilityClaims): boolean {
+    if (!claims?.id || !Number.isSafeInteger(claims.exp) || claims.exp <= this.now().getTime()) return false;
+    this.pruneRevocations(this.now().getTime());
+    const existed = this.revokedIds.has(claims.id);
+    this.revokedIds.set(claims.id, claims.exp);
+    this.ledger.delete(claims.id);
+    return !existed;
+  }
+
+  /** Invalidate every capability issued to a subject at or before this cutoff. */
+  revokeSubject(subject: string): boolean {
+    const normalized = String(subject ?? '').trim();
+    if (!normalized || normalized.length > MAX_FIELD_LENGTH) {
+      throw new CapabilityError('CAPABILITY_REQUEST_INVALID', `subject is required (max ${MAX_FIELD_LENGTH} characters)`);
+    }
+    const cutoff = this.now().getTime();
+    this.pruneRevocations(cutoff);
+    const previous = this.revokedSubjects.get(normalized);
+    if (previous !== undefined && previous.cutoff >= cutoff) return false;
+    const maxTtl = Math.max(...Object.values(SENSITIVE_ACTIONS).map((spec) => spec.maxTtlMs));
+    this.revokedSubjects.set(normalized, { cutoff, expiresAt: cutoff + maxTtl + CLOCK_SKEW_MS });
+    return true;
+  }
+
+  private pruneRevocations(now: number): void {
+    for (const [id, exp] of this.revokedIds) if (exp <= now) this.revokedIds.delete(id);
+    for (const [subject, revocation] of this.revokedSubjects) {
+      if (revocation.expiresAt <= now) this.revokedSubjects.delete(subject);
+    }
   }
 
   /**
