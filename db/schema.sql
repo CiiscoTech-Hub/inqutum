@@ -106,6 +106,28 @@ CREATE TABLE IF NOT EXISTS side_effect_checkpoints (
 CREATE INDEX IF NOT EXISTS idx_side_effect_checkpoints_open
   ON side_effect_checkpoints(updated_at) WHERE state IN ('started', 'in_doubt');
 
+-- Resumable record repair checkpoints for orphaned and inconsistent records.
+CREATE TABLE IF NOT EXISTS record_repair_checkpoints (
+  id VARCHAR(64) PRIMARY KEY,
+  status VARCHAR(20) NOT NULL CHECK (status IN ('pending', 'running', 'paused', 'completed', 'failed')),
+  phase VARCHAR(50) NOT NULL,
+  cursor TEXT,
+  dry_run BOOLEAN NOT NULL DEFAULT false,
+  batch_size INTEGER NOT NULL DEFAULT 100,
+  phases JSONB NOT NULL DEFAULT '[]'::jsonb,
+  scanned_count INTEGER NOT NULL DEFAULT 0,
+  repaired_count INTEGER NOT NULL DEFAULT 0,
+  skipped_count INTEGER NOT NULL DEFAULT 0,
+  failed_count INTEGER NOT NULL DEFAULT 0,
+  errors JSONB NOT NULL DEFAULT '[]'::jsonb,
+  action_log JSONB NOT NULL DEFAULT '[]'::jsonb,
+  started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  completed_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_repair_checkpoints_status
+  ON record_repair_checkpoints(status, updated_at DESC);
+
 -- Wallet alignment: databases created before wallet-scoped sellers still have
 -- the unused users table and invoices.user_id column. Both are dropped here so
 -- re-running the migration converges on the wallet-only schema.

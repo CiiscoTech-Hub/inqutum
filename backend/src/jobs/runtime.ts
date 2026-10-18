@@ -5,10 +5,19 @@ import { PostgresJobStore } from './postgres-job-store';
 
 export const EXPIRE_PENDING_INVOICES_JOB = 'invoices.expire-pending';
 export const EXPIRY_SWEEP_INTERVAL_MS = 60_000;
+export const RESUMABLE_REPAIR_JOB = 'records.resumable-repair';
 
 export interface JobHandlerDeps {
   /** Marks overdue PENDING invoices EXPIRED and returns how many changed. Must be idempotent. */
   expirePendingInvoices: () => Promise<number>;
+  /** Executes or resumes a record repair job. */
+  repairRecords?: (payload: {
+    jobId?: string;
+    dryRun?: boolean;
+    batchSize?: number;
+    phases?: any[];
+    maxBatches?: number;
+  }) => Promise<unknown>;
 }
 
 function assertPositiveFiniteNumber(value: number, name: string): void {
@@ -48,13 +57,28 @@ export function registerJobHandlers(worker: JobWorker, deps: JobHandlerDeps): Jo
   assertJobWorker(worker);
   assertJobHandlerDeps(deps);
 
-  return worker.register(EXPIRE_PENDING_INVOICES_JOB, async () => {
+  worker.register(EXPIRE_PENDING_INVOICES_JOB, async () => {
     const expired = await deps.expirePendingInvoices();
     if (!Number.isInteger(expired) || expired < 0) {
       throw new Error('expirePendingInvoices must resolve to a non-negative integer');
     }
     return { expired };
   });
+
+  if (deps.repairRecords) {
+    worker.register(RESUMABLE_REPAIR_JOB, async (payload) => {
+      const data = (payload?.data ?? {}) as {
+        jobId?: string;
+        dryRun?: boolean;
+        batchSize?: number;
+        phases?: any[];
+        maxBatches?: number;
+      };
+      return await deps.repairRecords!(data);
+    });
+  }
+
+  return worker;
 }
 
 /**
