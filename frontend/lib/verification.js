@@ -1,9 +1,10 @@
 /**
- * Client mirror of the canonical verification contract (issue #224) and Error Taxonomy (issue #48).
+ * Client mirror of the canonical verification contract (issue #224), Error Taxonomy (issue #48)
+ * and stable-code remediation hints (issue #303).
  *
  * The authority is `backend/src/services/payment-verification.ts` and `backend/src/errors/error-taxonomy.ts`;
  * this file exists so the pay flow can reject malformed input before a round trip and
- * surface the exact code/message/recovery guidance the server would return.
+ * surface the exact code/message/recovery/remediation guidance the server would return.
  */
 
 const VERIFICATION_CONTRACT_VERSION = '1.0.0';
@@ -44,6 +45,69 @@ const RECOVERY_ACTIONS = {
   NETWORK_MISMATCH: 'Switch your Freighter wallet to the matching Stellar network (Testnet or Public).',
 };
 
+const REMEDIATION = {
+  MISSING_TX_HASH: [
+    'Open your Stellar wallet and copy the 64-character hash of the payment transaction.',
+    'Paste it into the transaction hash field and submit the form again.',
+  ],
+  INVALID_TX_HASH: [
+    'Remove spaces, dashes, or any 0x prefix from the pasted value.',
+    'Copy the hash again from your wallet’s transaction detail view; it must be exactly 64 hex characters.',
+  ],
+  INVALID_PAYER_NAME: [
+    'Replace the payer name with plain text, or clear the field if it is optional.',
+    'Resubmit the payment form.',
+  ],
+  INVALID_PAYER_EMAIL: [
+    'Correct the address so it matches the format name@domain.com.',
+    'Leave the field empty if no receipt is needed, then resubmit.',
+  ],
+  PAYER_INFO_TOO_LONG: [
+    'Shorten the payer name and email so each is under 255 characters.',
+    'Resubmit the form.',
+  ],
+  INVOICE_ALREADY_PAID: [
+    'Download the quittance proof from the invoice page, or email it from the receipt action.',
+    'Ask the seller for a new invoice if another payment is genuinely required.',
+  ],
+  INVOICE_EXPIRED: [
+    'Contact the seller and ask for a new invoice with a fresh expiry.',
+    'Do not send payment against the expired memo; the seller will reject it.',
+  ],
+  INVOICE_NOT_PENDING: [
+    'Refresh the invoice page to see its current status.',
+    'Ask the seller for a new invoice if this one is no longer PENDING.',
+  ],
+  TRANSACTION_NOT_FOUND: [
+    'Wait about 10 seconds for the ledger to close, then retry verification.',
+    'If it still fails, confirm the hash in a Stellar explorer for the invoice network before retrying.',
+  ],
+  NO_PAYMENT_OPERATION: [
+    'Open the transaction in a Stellar explorer and confirm it contains a payment operation to the seller.',
+    'Resubmit with the hash of the payment that was actually sent.',
+  ],
+  MEMO_MISMATCH: [
+    'Copy the exact memo shown on the invoice into your wallet before sending.',
+    'If payment already went out, contact the seller — the hash alone does not match this invoice.',
+  ],
+  DESTINATION_MISMATCH: [
+    'Compare the payment destination with the seller public key on the invoice.',
+    'Send funds to the seller public key from the invoice, then resubmit the new transaction hash.',
+  ],
+  AMOUNT_MISMATCH: [
+    'Recalculate the amount due, including every decimal place shown on the invoice.',
+    'Resend the exact amount (matching at 7-decimal stroop precision) and verify the new hash.',
+  ],
+  ASSET_MISMATCH: [
+    'Check the asset code and issuer on the invoice.',
+    'Select the matching asset in your wallet (both code and issuer must match) and repay.',
+  ],
+  NETWORK_MISMATCH: [
+    'Open Freighter settings and select the network named on the invoice (Testnet or Public).',
+    'Resubmit the same transaction hash.',
+  ],
+};
+
 const MAX_PAYER_FIELD_LENGTH = 255;
 const PAYER_EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const TX_HASH_PATTERN = /^[0-9a-f]{64}$/i;
@@ -55,6 +119,7 @@ const failure = (code) => ({
   code,
   error: VERIFICATION_MESSAGES[code],
   recoveryAction: RECOVERY_ACTIONS[code],
+  remediation: REMEDIATION[code],
 });
 
 /** A Stellar transaction hash is 64 hexadecimal characters. */
@@ -130,6 +195,9 @@ const resolveUserSafeError = (error, fallback = 'An unexpected error occurred') 
   const recoveryAction = (code && RECOVERY_ACTIONS[code]) || data.recoveryAction || 'Please check your input and retry.';
   const retryable = data.retryable !== undefined ? data.retryable : (code === 'TRANSACTION_NOT_FOUND' || data.category === 'NETWORK');
   const correlationId = data.correlationId || (error && error.correlationId);
+  const remediation = Array.isArray(data.remediation) && data.remediation.length > 0
+    ? data.remediation
+    : (code && REMEDIATION[code]) || [];
 
   return {
     code,
@@ -137,6 +205,7 @@ const resolveUserSafeError = (error, fallback = 'An unexpected error occurred') 
     category: data.category || 'SETTLEMENT',
     retryable,
     recoveryAction,
+    remediation,
     correlationId,
   };
 };
@@ -145,6 +214,7 @@ module.exports = {
   VERIFICATION_CONTRACT_VERSION,
   VERIFICATION_MESSAGES,
   RECOVERY_ACTIONS,
+  REMEDIATION,
   failure,
   isValidTxHash,
   normalizeTransactionHash,

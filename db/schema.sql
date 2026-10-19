@@ -106,6 +106,28 @@ CREATE TABLE IF NOT EXISTS side_effect_checkpoints (
 CREATE INDEX IF NOT EXISTS idx_side_effect_checkpoints_open
   ON side_effect_checkpoints(updated_at) WHERE state IN ('started', 'in_doubt');
 
+-- Resumable record repair checkpoints for orphaned and inconsistent records.
+CREATE TABLE IF NOT EXISTS record_repair_checkpoints (
+  id VARCHAR(64) PRIMARY KEY,
+  status VARCHAR(20) NOT NULL CHECK (status IN ('pending', 'running', 'paused', 'completed', 'failed')),
+  phase VARCHAR(50) NOT NULL,
+  cursor TEXT,
+  dry_run BOOLEAN NOT NULL DEFAULT false,
+  batch_size INTEGER NOT NULL DEFAULT 100,
+  phases JSONB NOT NULL DEFAULT '[]'::jsonb,
+  scanned_count INTEGER NOT NULL DEFAULT 0,
+  repaired_count INTEGER NOT NULL DEFAULT 0,
+  skipped_count INTEGER NOT NULL DEFAULT 0,
+  failed_count INTEGER NOT NULL DEFAULT 0,
+  errors JSONB NOT NULL DEFAULT '[]'::jsonb,
+  action_log JSONB NOT NULL DEFAULT '[]'::jsonb,
+  started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  completed_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_repair_checkpoints_status
+  ON record_repair_checkpoints(status, updated_at DESC);
+
 -- Wallet alignment: databases created before wallet-scoped sellers still have
 -- the unused users table and invoices.user_id column. Both are dropped here so
 -- re-running the migration converges on the wallet-only schema.
@@ -160,3 +182,30 @@ SELECT
   asset_code
 FROM invoices
 GROUP BY seller_public_key, asset_code;
+
+-- Email Deliveries Table (Phase E queue & anti-spam)
+CREATE TABLE IF NOT EXISTS email_deliveries (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  invoice_id UUID REFERENCES invoices(id) ON DELETE CASCADE,
+  recipient_email VARCHAR(255) NOT NULL,
+  dedupe_key VARCHAR(320),
+  sender_wallet VARCHAR(56) NOT NULL,
+  email_type VARCHAR(50) NOT NULL,
+  subject VARCHAR(255) NOT NULL,
+  status VARCHAR(20) NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'SENDING', 'SENT', 'FAILED', 'PERMANENTLY_FAILED', 'PAUSED')),
+  attempts INT NOT NULL DEFAULT 0,
+  max_attempts INT NOT NULL DEFAULT 5,
+  next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_attempt_at TIMESTAMPTZ,
+  last_error TEXT,
+  is_retryable BOOLEAN NOT NULL DEFAULT TRUE,
+  payload JSONB,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  sent_at TIMESTAMPTZ
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_email_deliveries_dedupe_key ON email_deliveries(dedupe_key) WHERE dedupe_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_email_deliveries_invoice ON email_deliveries(invoice_id);
+CREATE INDEX IF NOT EXISTS idx_email_deliveries_sender ON email_deliveries(sender_wallet);
+CREATE INDEX IF NOT EXISTS idx_email_deliveries_pending ON email_deliveries(status, next_attempt_at) WHERE status = 'PENDING';

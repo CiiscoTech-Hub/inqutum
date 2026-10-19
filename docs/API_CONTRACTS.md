@@ -2,7 +2,7 @@
 
 Integration-facing HTTP contract for the Quittance/Inqutum backend.
 
-- **Contract version:** `1.0.0` (tracked in `CONTRACT_VERSION`, `backend/src/api/contract.ts`)
+- **Contract version:** `1.1.0` (tracked in `CONTRACT_VERSION`, `backend/src/api/contract.ts`)
 - **Enforced by:** `backend/tests/api-contract.test.ts`, which runs in CI
 - **Base path:** `/api`
 
@@ -55,6 +55,7 @@ the drift test pins that list, so it cannot grow by accident:
 | --- | --- | --- |
 | `GET /` | JSON banner | humans / uptime scripts |
 | `GET /api/health` | JSON probe payload | Kubernetes liveness |
+| `GET /api/health/dependencies` | JSON probe payload | Kubernetes liveness / monitoring |
 | `GET /api/ready` | JSON probe payload | Kubernetes readiness |
 | `GET /api/metrics` | Prometheus text | scraper |
 | `GET /api/audit/export` | streamed document | browser download |
@@ -68,20 +69,28 @@ reads them. Everything else on the API returns the envelope.
 ```json
 {
   "success": false,
-  "error": "Asset code is required for credit assets",
-  "code": "INVALID_ASSET",
+  "error": "Invalid input provided",
+  "code": "VALIDATION_FAILED",
   "category": "VALIDATION",
   "retryable": false,
-  "recoveryAction": "Supply both assetCode and assetIssuer, or omit both to use native XLM.",
+  "recoveryAction": "Review the input parameters, ensuring valid numbers, addresses, and formats.",
+  "remediation": [
+    "Read the field named in the error message and correct its value.",
+    "Resubmit the request; if the message stays unclear, report the correlationId."
+  ],
   "correlationId": "3f8c1a20-…",
   "timestamp": "2026-09-27T09:14:02.118Z"
 }
 ```
 
 `error` is always a human-readable string. When the failure maps to a domain
-error, `code`, `category`, `retryable` and `recoveryAction` come from
-`DOMAIN_ERROR_TAXONOMY` in `backend/src/errors/error-taxonomy.ts` and are
-guaranteed to agree with that table. Every failure carries a `correlationId`,
+error, `code`, `category`, `retryable`, `recoveryAction` and `remediation` come
+from `DOMAIN_ERROR_TAXONOMY` in `backend/src/errors/error-taxonomy.ts` and are
+guaranteed to agree with that table. `remediation` is the ordered list of
+concrete steps for the code; it was added in contract `1.1.0` as an optional
+key (clients that predate it keep working — see the migration plan in
+[ERRORS.md](ERRORS.md)), which also holds the complete code catalog and the
+operational edge-case guidance. Every failure carries a `correlationId`,
 which is also logged — quote it in a bug report.
 
 ## Authentication
@@ -135,6 +144,7 @@ cursor. These semantics are pinned by
 | --- | --- | --- | --- | --- |
 | `GET` | `/` | none | 200 | Server banner: name, version and storage mode. |
 | `GET` | `/api/health` | none | 200 | Liveness plus the storage mode the server is running in. |
+| `GET` | `/api/health/dependencies` | none | 200, 503 | Dependency-aware health status. Returns per-dependency state (healthy/degraded/down) and overall status. 503 when overall is down. |
 | `GET` | `/api/ready` | none | 200, 503 | Readiness probe. 503 when a dependency is unavailable. |
 | `POST` | `/api/invoices` | none | 201, 400 | Create an invoice. 201 returns the stored invoice. |
 | `GET` | `/api/invoices` | none | 200, 400, 500 | List invoices for a seller. Keyset pagination via `cursor`; `limit` clamped to 1-200. |

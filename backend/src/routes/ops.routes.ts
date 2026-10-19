@@ -2,6 +2,7 @@ import { Router } from 'express';
 import type { JobStore } from '../jobs/job-types';
 import type { InvoiceStorage } from '../storage/invoice-storage';
 import { metrics } from '../observability/telemetry';
+import { apiFailure } from '../types/api';
 import { buildOpsHealthReport } from '../ops/ops-health';
 import { requireAdmin } from './jobs.routes';
 import {
@@ -11,9 +12,27 @@ import {
   type ImpersonationPermission,
 } from '../audit/impersonation';
 import { stellarPublicKeySchema } from '../utils/validation';
-import { simulatePolicyChange } from '../domain/policy-simulation';
+import {
+  simulatePolicyChange,
+  runMaintainerPolicySimulation,
+  PolicySimulationPermissionError,
+  PolicySimulationValidationError,
+} from '../domain/policy-simulation';
 import { evaluatePolicyDryRun, parsePolicyDryRunRequest, PolicyDryRunError } from '../domain/policy-dry-run';
 import { loadPolicy } from '../domain/policy';
+import {
+  TrendExportService,
+  TrendExportPermissionError,
+  TrendExportValidationError,
+  type TrendWindowGranularity,
+} from '../exports/trend-export';
+import { explainRejection } from '../errors/rejection-explanation';
+import {
+  ExternalReferenceVerificationService,
+  defaultExternalReferenceVerifier,
+  type ExternalReferenceInput,
+  type ExternalReferenceProbe,
+} from '../services/external-reference-verification';
 import { CapabilityError, CapabilityTokenService, capabilityServiceFromEnv } from '../security/capability-tokens';
 import { AdminConfigError, AdminConfigService, adminConfig } from '../config/admin-config';
 import { staleProjectionService } from '../ops/stale-projections.service';
@@ -44,6 +63,12 @@ import {
   ReplayInProgressError,
   UnknownProjectorVersionError,
 } from '../ops/projection-replay';
+import {
+  ResumableRepairService,
+  RepairJobNotFoundError,
+  type RepairPhase,
+} from '../ops/resumable-repair.service';
+import { pool } from '../config/database';
 
 export interface OpsRouterOptions {
   storage: InvoiceStorage;
@@ -68,8 +93,14 @@ export interface OpsRouterOptions {
   adminConfig?: AdminConfigService;
   /** Search-index event replay (#290). Defaults to the live index and audit trail. */
   replay?: ProjectionReplayService;
-  /** Degraded mode service for unavailable dependencies. */
-  degradedMode?: DegradedModeService;
+  /** Resumable record repair service for orphaned and inconsistent records. */
+  repairService?: ResumableRepairService;
+  /** Historical trend export service. */
+  trendExport?: TrendExportService;
+  /** Resilient external reference verification service. */
+  externalReferences?: ExternalReferenceVerificationService;
+  /** Custom external reference probe for verification routes. */
+  externalReferenceProbe?: ExternalReferenceProbe;
 }
 
 function defaultApprovals(): MaintainerApprovalService | null {
@@ -124,8 +155,15 @@ export function createOpsRouter(options: OpsRouterOptions): Router {
       index: defaultSearchIndex,
       events: () => auditStore.listChronological(),
     });
-  const degradedMode =
-    options.degradedMode ?? new DegradedModeService({ probes: options.dependencyProbes });
+  const repairService = options.repairService ?? new ResumableRepairService({ db: pool });
+  const trendExport =
+    options.trendExport ??
+    new TrendExportService({
+      storage: options.storage,
+      jobs: options.jobs,
+      recentLogs: () => metrics.getRecentLogs(200),
+    });
+  const externalReferences = options.externalReferences ?? defaultExternalReferenceVerifier;
 
   if (approvals && options.jobs) {
     const jobs = options.jobs;
@@ -144,7 +182,7 @@ export function createOpsRouter(options: OpsRouterOptions): Router {
   }
 
   const fail = (res: any, req: any, status: number, code: string, error: string) =>
-    res.status(status).json({ success: false, code, error, correlationId: req.correlationId });
+    res.status(status).json(apiFailure(error, { code, correlationId: req.correlationId }));
 
   // -- External dependency degradation matrix --------------------------------
 
@@ -383,11 +421,57 @@ export function createOpsRouter(options: OpsRouterOptions): Router {
   // Policy simulation preview before committing changes (Issue #267)
   router.post('/ops/policy/simulate', admin, async (req, res, next) => {
     try {
-      const invoices = options.storage.getAllInvoices ? await options.storage.getAllInvoices() : [];
       const current = loadPolicy();
-      const simulation = simulatePolicyChange(invoices, req.body?.proposedPolicy || {}, current);
+      const rawPolicy = req.body?.proposedPolicy;
+      const actor = req.body?.actor ?? { id: 'ops-admin', role: 'maintainer' };
+
+      // When caller supplies explicit proposedPolicy fields, selection, fixtureName, or actor,
+      // run the full maintainer simulation tool with strict validation and workflow checks.
+      if (
+        req.body?.fixtureName ||
+        req.body?.selection ||
+        req.body?.actor ||
+        (rawPolicy !== undefined &&
+          (typeof rawPolicy !== 'object' ||
+            rawPolicy === null ||
+            Array.isArray(rawPolicy) ||
+            Object.keys(rawPolicy).length > 0))
+      ) {
+        const invoices =
+          req.body?.fixtureName || !options.storage.getAllInvoices
+            ? []
+            : await options.storage.getAllInvoices();
+        const workflows = options.jobs ? (await options.jobs.list({ limit: 1000 })).jobs : [];
+        const simulation = runMaintainerPolicySimulation({
+          actor,
+          proposedPolicy: rawPolicy,
+          currentPolicy: current,
+          invoices,
+          workflows,
+          selection: req.body?.selection,
+          fixtureName: req.body?.fixtureName,
+          maxExamples: req.body?.maxExamples,
+        });
+        return res.json({ success: true, data: simulation, correlationId: req.correlationId });
+      }
+
+      const invoices = options.storage.getAllInvoices ? await options.storage.getAllInvoices() : [];
+      const simulation = simulatePolicyChange(invoices, rawPolicy || {}, current);
       res.json({ success: true, data: simulation, correlationId: req.correlationId });
     } catch (err) {
+      if (
+        err instanceof PolicySimulationPermissionError ||
+        err instanceof PolicySimulationValidationError
+      ) {
+        const explanation = explainRejection(err, { correlationId: req.correlationId });
+        return res.status(err.httpStatus).json({
+          success: false,
+          code: err.code,
+          error: err.message,
+          explanation,
+          correlationId: req.correlationId,
+        });
+      }
       next(err);
     }
   });
@@ -512,11 +596,11 @@ export function createOpsRouter(options: OpsRouterOptions): Router {
       const report = await replay.replay({ dryRun, projectorVersion: version });
       if (report.outcome === 'refused') {
         return res.status(409).json({
-          success: false,
-          code: 'REPLAY_REFUSED',
-          error: `Replay not applied: ${report.reasons.join('; ')}`,
+          ...apiFailure(`Replay not applied: ${report.reasons.join('; ')}`, {
+            code: 'REPLAY_REFUSED',
+            correlationId: req.correlationId,
+          }),
           data: report,
-          correlationId: req.correlationId,
         });
       }
       if (report.outcome === 'applied') {
@@ -580,6 +664,96 @@ export function createOpsRouter(options: OpsRouterOptions): Router {
     }
   });
 
+  // -- Resumable record repair jobs -----------------------------------------
+
+  router.post('/ops/repair-records/jobs', admin, async (req, res, next) => {
+    try {
+      const { dryRun, batchSize, phases, maxBatches } = req.body ?? {};
+      const report = await repairService.startRepairJob({
+        dryRun: dryRun !== undefined ? Boolean(dryRun) : undefined,
+        batchSize: typeof batchSize === 'number' ? batchSize : undefined,
+        phases: Array.isArray(phases) ? (phases as RepairPhase[]) : undefined,
+        maxBatches: typeof maxBatches === 'number' ? maxBatches : undefined,
+      });
+
+      auditStore.recordEvent({
+        action: 'MAINTAINER_ACTION',
+        actor: { type: 'maintainer', id: 'ops-admin' },
+        scope: { entityType: 'system', entityId: report.jobId },
+        reason: `Record repair job started (${report.status})`,
+        metadata: {
+          jobId: report.jobId,
+          status: report.status,
+          dryRun: report.dryRun,
+          repaired: report.counts.repaired,
+          scanned: report.counts.scanned,
+          failed: report.counts.failed,
+        },
+        correlationId: req.correlationId,
+      });
+
+      res.status(201).json({ success: true, data: report, correlationId: req.correlationId });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post('/ops/repair-records/jobs/:id/resume', admin, async (req, res, next) => {
+    try {
+      const { batchSize, maxBatches } = req.body ?? {};
+      const report = await repairService.resumeRepairJob(req.params.id, {
+        batchSize: typeof batchSize === 'number' ? batchSize : undefined,
+        maxBatches: typeof maxBatches === 'number' ? maxBatches : undefined,
+      });
+
+      auditStore.recordEvent({
+        action: 'MAINTAINER_ACTION',
+        actor: { type: 'maintainer', id: 'ops-admin' },
+        scope: { entityType: 'system', entityId: report.jobId },
+        reason: `Record repair job resumed (${report.status})`,
+        metadata: {
+          jobId: report.jobId,
+          status: report.status,
+          dryRun: report.dryRun,
+          repaired: report.counts.repaired,
+          scanned: report.counts.scanned,
+          failed: report.counts.failed,
+        },
+        correlationId: req.correlationId,
+      });
+
+      res.json({ success: true, data: report, correlationId: req.correlationId });
+    } catch (err) {
+      if (err instanceof RepairJobNotFoundError) {
+        return fail(res, req, 404, 'REPAIR_JOB_NOT_FOUND', err.message);
+      }
+      next(err);
+    }
+  });
+
+  router.get('/ops/repair-records/jobs/:id', admin, async (req, res, next) => {
+    try {
+      const report = await repairService.getJob(req.params.id);
+      if (!report) {
+        return fail(res, req, 404, 'REPAIR_JOB_NOT_FOUND', `Repair job ${req.params.id} not found`);
+      }
+      res.json({ success: true, data: report, correlationId: req.correlationId });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.get('/ops/repair-records/jobs', admin, async (req, res, next) => {
+    try {
+      const status = typeof req.query.status === 'string' ? (req.query.status as any) : undefined;
+      const limit = typeof req.query.limit === 'string' ? parseInt(req.query.limit, 10) : undefined;
+      const jobs = await repairService.listJobs({ status, limit });
+      res.json({ success: true, data: jobs, correlationId: req.correlationId });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   // -- Scoped maintainer impersonation (#76) --------------------------------
 
   router.get('/ops/impersonation', admin, (req, res) => {
@@ -601,12 +775,10 @@ export function createOpsRouter(options: OpsRouterOptions): Router {
   router.post('/ops/impersonation', admin, (req, res) => {
     const target = stellarPublicKeySchema.safeParse(req.body?.targetId);
     if (!target.success) {
-      return res.status(400).json({
-        success: false,
+      return res.status(400).json(apiFailure('targetId must be a valid Stellar public key', {
         code: 'TARGET_INVALID',
-        error: 'targetId must be a valid Stellar public key',
         correlationId: req.correlationId,
-      });
+      }));
     }
 
     const permissions = (req.body?.permissions ?? ['read']) as ImpersonationPermission[];
@@ -627,12 +799,10 @@ export function createOpsRouter(options: OpsRouterOptions): Router {
         correlationId: req.correlationId,
       });
     } catch (err) {
-      return res.status(400).json({
-        success: false,
+      return res.status(400).json(apiFailure(err instanceof Error ? err.message : 'Impersonation session rejected', {
         code: 'IMPERSONATION_REJECTED',
-        error: err instanceof Error ? err.message : 'Impersonation session rejected',
         correlationId: req.correlationId,
-      });
+      }));
     }
   });
 
@@ -643,14 +813,160 @@ export function createOpsRouter(options: OpsRouterOptions): Router {
       req.body?.maintainerId ? String(req.body.maintainerId) : undefined,
     );
     if (!closed) {
-      return res.status(404).json({
-        success: false,
+      return res.status(404).json(apiFailure('No active session with that id for this maintainer', {
         code: 'SESSION_NOT_FOUND',
-        error: 'No active session with that id for this maintainer',
         correlationId: req.correlationId,
-      });
+      }));
     }
     return res.json({ success: true, data: { sessionId, closed: true }, correlationId: req.correlationId });
+  });
+
+  // -- Historical trend export for operational and financial metrics ---------
+
+  const handleTrendExport = async (req: any, res: any, next: any) => {
+    try {
+      const sourceParams = req.method === 'GET' ? req.query : req.body ?? {};
+      const actor = sourceParams.actor ?? {
+        id: String(sourceParams.actorId ?? 'ops-admin'),
+        role: String(sourceParams.role ?? 'maintainer'),
+      };
+      const dimensions =
+        typeof sourceParams.dimensions === 'string'
+          ? sourceParams.dimensions.split(',').map((d: string) => d.trim()).filter(Boolean)
+          : Array.isArray(sourceParams.dimensions)
+          ? sourceParams.dimensions
+          : undefined;
+
+      const artifact = await trendExport.exportTrends({
+        actor,
+        granularity: sourceParams.granularity as TrendWindowGranularity | undefined,
+        format: sourceParams.format === 'csv' ? 'csv' : sourceParams.format === 'json' ? 'json' : undefined,
+        from: sourceParams.from,
+        to: sourceParams.to,
+        dimensions,
+        fillEmptyBuckets: Boolean(sourceParams.fillEmptyBuckets),
+        maxBuckets: sourceParams.maxBuckets !== undefined ? Number(sourceParams.maxBuckets) : undefined,
+        maxSourceRecords:
+          sourceParams.maxSourceRecords !== undefined ? Number(sourceParams.maxSourceRecords) : undefined,
+      });
+
+      auditStore.recordEvent({
+        action: 'MAINTAINER_ACTION',
+        actor: { type: 'maintainer', id: actor.id },
+        scope: { entityType: 'system', entityId: artifact.meta.exportId },
+        reason: 'Historical trend export generated',
+        metadata: {
+          schema: artifact.meta.schema,
+          schemaVersion: artifact.meta.schemaVersion,
+          granularity: artifact.meta.granularity,
+          bucketCount: artifact.meta.bucketCount,
+          truncated: artifact.meta.truncated,
+        },
+        correlationId: req.correlationId,
+      });
+
+      if (artifact.meta.format === 'csv' && req.query?.raw === 'true') {
+        res.setHeader('Content-Type', artifact.contentType);
+        res.setHeader(
+          'Content-Disposition',
+          `attachment; filename="inqutum-trends-v${artifact.meta.schemaVersion}.csv"`
+        );
+        return res.status(200).send(artifact.body);
+      }
+
+      return res.status(200).json({
+        success: true,
+        data: {
+          meta: artifact.meta,
+          totals: artifact.totals,
+          buckets: artifact.buckets,
+          ...(artifact.meta.format === 'csv' ? { csv: artifact.body } : {}),
+        },
+        correlationId: req.correlationId,
+      });
+    } catch (err) {
+      if (err instanceof TrendExportPermissionError || err instanceof TrendExportValidationError) {
+        const explanation = explainRejection(err, { correlationId: req.correlationId });
+        return res.status(err.httpStatus).json({
+          success: false,
+          code: err.code,
+          error: err.message,
+          explanation,
+          correlationId: req.correlationId,
+        });
+      }
+      next(err);
+    }
+  };
+
+  router.post('/ops/trends/export', admin, handleTrendExport);
+  router.get('/ops/trends/export', admin, handleTrendExport);
+
+  // -- Resilient external reference verification -----------------------------
+
+  router.post('/ops/external-references/verify', admin, async (req, res, next) => {
+    try {
+      const input: ExternalReferenceInput = {
+        referenceId: String(req.body?.referenceId ?? ''),
+        referenceType: req.body?.referenceType,
+        invoiceId: String(req.body?.invoiceId ?? ''),
+        externalIdentifier: String(req.body?.externalIdentifier ?? ''),
+        sourceSystem: String(req.body?.sourceSystem ?? 'external-source'),
+        endpoint: typeof req.body?.endpoint === 'string' ? req.body.endpoint : undefined,
+        expectedAmount: typeof req.body?.expectedAmount === 'number' ? req.body.expectedAmount : undefined,
+        expectedAssetCode:
+          typeof req.body?.expectedAssetCode === 'string' ? req.body.expectedAssetCode : undefined,
+      };
+
+      const defaultProbe: ExternalReferenceProbe = async () => {
+        if (req.body?.mockSourceResponse !== undefined) {
+          return req.body.mockSourceResponse;
+        }
+        return {
+          status: 'verified',
+          observedTimestamp: new Date().toISOString(),
+          ledgerSequence: 100_000,
+          settledAmount: input.expectedAmount ?? 100,
+          assetCode: input.expectedAssetCode ?? 'XLM',
+        };
+      };
+
+      const probe = options.externalReferenceProbe ?? defaultProbe;
+      const record =
+        req.body?.singleAttempt === true
+          ? await externalReferences.verifySingleAttempt(input, probe)
+          : await externalReferences.verifyWithRetries(input, probe);
+
+      const status = record.status === 'VERIFIED' ? 200 : record.status === 'RETRY_SCHEDULED' ? 202 : 422;
+      return res.status(status).json({
+        success: record.status === 'VERIFIED',
+        data: record,
+        correlationId: req.correlationId,
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.get('/ops/external-references/:id', admin, (req, res) => {
+    const record = externalReferences.getRecord(req.params.id);
+    if (!record) {
+      return fail(res, req, 404, 'REFERENCE_NOT_FOUND', 'External reference verification record not found');
+    }
+    return res.json({ success: true, data: record, correlationId: req.correlationId });
+  });
+
+  // -- User-facing explanation resolver endpoint -----------------------------
+
+  router.post('/ops/rejections/explain', (req, res) => {
+    const explanation = explainRejection(req.body?.error ?? req.body ?? {}, {
+      correlationId: req.correlationId,
+    });
+    res.status(200).json({
+      success: true,
+      data: explanation,
+      correlationId: req.correlationId,
+    });
   });
 
   return router;

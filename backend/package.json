@@ -8,6 +8,7 @@
     "dev:pg": "tsx watch src/server.ts",
     "dev:mvp": "tsx watch src/server-mvp.ts",
     "test": "node --import tsx --test tests/*.test.ts tests/isolated/*.test.js",
+    "test:redaction": "node --import tsx --test tests/redaction.test.ts",
     "test:pg": "node --import tsx --test tests/invoice-postgres.integration.test.ts",
     "test:isolated": "node --test tests/isolated/*.test.js",
     "build": "tsc",
@@ -30,6 +31,9 @@
     "release:gate": "tsx ../scripts/release-readiness-gate.ts",
     "release:check": "tsx ../scripts/release-readiness-gate.ts --check",
     "test:load:cardinality": "tsx ../scripts/load-cardinality-burst.ts",
+    "export:trends": "tsx ../scripts/export-trends.ts",
+    "policy:simulate": "tsx ../scripts/simulate-policy.ts",
+    "errors:catalog": "tsx scripts/generate-error-catalog.ts",
     "typecheck": "tsc --noEmit"
   },
   "engines": {

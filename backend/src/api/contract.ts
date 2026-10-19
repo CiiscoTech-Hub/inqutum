@@ -83,8 +83,13 @@ export interface ContractDrift {
   phantom: RouteDescriptor[];
 }
 
-/** Bumped when a breaking change to the declared surface is made deliberately. */
-export const CONTRACT_VERSION = '1.0.0';
+/**
+ * Bumped when the declared surface changes deliberately. 1.1.0 is a purely
+ * additive change: failure envelopes may carry `remediation: string[]` for the
+ * stable error code (issue #303, see docs/ERRORS.md). Existing clients that
+ * ignore the new key keep working; a rollback is simply clients not reading it.
+ */
+export const CONTRACT_VERSION = '1.1.0';
 
 /**
  * Express 4 encodes a mounted path as a regexp source of the shape
@@ -213,6 +218,16 @@ export const API_CONTRACT: ContractEndpoint[] = [
     surfaces: BOTH,
     auth: 'none',
     summary: 'Readiness probe. 503 when a dependency is unavailable.',
+    responseKind: 'raw',
+    responses: [200, 503],
+  },
+  {
+    method: 'GET',
+    path: '/api/health/dependencies',
+    group: 'public',
+    surfaces: BOTH,
+    auth: 'none',
+    summary: 'Dependency-aware health status. Returns per-dependency state (healthy/degraded/down) and overall status. 503 when overall is down.',
     responseKind: 'raw',
     responses: [200, 503],
   },

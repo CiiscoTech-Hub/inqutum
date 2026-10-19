@@ -2,9 +2,11 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
   VERIFICATION_MESSAGES,
+  REMEDIATION,
   isValidTxHash,
   checkTxHash,
   checkPayerInfo,
+  resolveUserSafeError,
   resolveVerificationError,
   normalizeTransactionHash,
 } = require('../lib/verification');
@@ -105,4 +107,28 @@ test('covers every rejection code with a message', () => {
     assert.equal(typeof VERIFICATION_MESSAGES[code], 'string');
     assert.ok(VERIFICATION_MESSAGES[code].length > 0);
   }
+});
+
+test('mirrors remediation steps for every verification code (issue #303)', () => {
+  const codes = Object.keys(VERIFICATION_MESSAGES);
+
+  assert.deepEqual(Object.keys(REMEDIATION).sort(), codes.sort());
+  for (const code of codes) {
+    assert.ok(Array.isArray(REMEDIATION[code]) && REMEDIATION[code].length > 0, code);
+    for (const step of REMEDIATION[code]) {
+      assert.equal(typeof step, 'string');
+      assert.ok(step.trim().length > 0);
+    }
+  }
+
+  const local = resolveUserSafeError({ response: { data: { code: 'MEMO_MISMATCH' } } });
+  assert.deepEqual(local.remediation, REMEDIATION.MEMO_MISMATCH);
+
+  const server = resolveUserSafeError({
+    response: { data: { code: 'MEMO_MISMATCH', remediation: ['server steps win'] } },
+  });
+  assert.deepEqual(server.remediation, ['server steps win']);
+
+  const preContract = resolveUserSafeError({ response: { data: { error: 'legacy' } } });
+  assert.deepEqual(preContract.remediation, []);
 });

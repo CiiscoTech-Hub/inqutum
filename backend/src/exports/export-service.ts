@@ -20,6 +20,7 @@
 
 import { v4 as uuidv4 } from 'uuid';
 import type { InvoiceStorage, StoredInvoice } from '../storage/invoice-storage';
+import { redactSensitiveText } from '../security/redaction';
 
 export const EXPORT_SCHEMA_ID = 'quittance.invoice-export';
 export const EXPORT_SCHEMA_VERSION = 1;
@@ -138,12 +139,12 @@ function positiveInt(
 export function toExportRecord(invoice: StoredInvoice): ExportRecord {
   return {
     id: invoice.id,
-    memo: invoice.memo,
+    memo: typeof invoice.memo === 'string' ? redactSensitiveText(invoice.memo) : invoice.memo,
     status: invoice.status,
     amount: invoice.amount,
     assetCode: invoice.assetCode,
     assetIssuer: invoice.assetIssuer ?? null,
-    description: invoice.description ?? null,
+    description: typeof invoice.description === 'string' ? redactSensitiveText(invoice.description) : null,
     createdAt: iso(invoice.createdAt),
     expiresAt: iso(invoice.expiresAt),
     paidAt: iso(invoice.paidAt),

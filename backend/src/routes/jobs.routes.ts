@@ -2,6 +2,7 @@ import { NextFunction, Request, Response, Router } from 'express';
 import { timingSafeEqual } from 'crypto';
 import { Job, JobStatus, JobStore } from '../jobs/job-types';
 import { auditStore } from '../audit/audit-service';
+import { apiFailure } from '../types/api';
 
 const STATUSES: JobStatus[] = ['queued', 'running', 'succeeded', 'dead'];
 
@@ -22,12 +23,12 @@ export function requireAdmin(adminToken?: string) {
   return (req: Request, res: Response, next: NextFunction) => {
     const token = adminToken ?? process.env.JOBS_ADMIN_TOKEN;
     if (!token) {
-      return res.status(403).json({ success: false, code: 'JOBS_ADMIN_DISABLED', error: 'Job inspection is not enabled', correlationId: req.correlationId });
+      return res.status(403).json(apiFailure('Job inspection is not enabled', { code: 'JOBS_ADMIN_DISABLED', correlationId: req.correlationId }));
     }
     const header = req.header('authorization') ?? '';
     const provided = header.startsWith('Bearer ') ? header.slice(7) : '';
     if (!provided || !tokenMatches(provided, token)) {
-      return res.status(401).json({ success: false, code: 'UNAUTHORIZED', error: 'Invalid or missing admin token', correlationId: req.correlationId });
+      return res.status(401).json(apiFailure('Invalid or missing admin token', { code: 'UNAUTHORIZED', correlationId: req.correlationId }));
     }
     next();
   };
@@ -49,7 +50,7 @@ export function createJobsRouter(options: JobsRouterOptions): Router {
     try {
       const status = req.query.status as string | undefined;
       if (status && !STATUSES.includes(status as JobStatus)) {
-        return res.status(400).json({ success: false, code: 'INVALID_STATUS', error: `status must be one of ${STATUSES.join(', ')}`, correlationId: req.correlationId });
+        return res.status(400).json(apiFailure(`status must be one of ${STATUSES.join(', ')}`, { code: 'INVALID_STATUS', correlationId: req.correlationId }));
       }
       const limit = Math.min(Math.max(parseInt(String(req.query.limit ?? '50'), 10) || 50, 1), 200);
       const offset = Math.max(parseInt(String(req.query.offset ?? '0'), 10) || 0, 0);
@@ -68,7 +69,7 @@ export function createJobsRouter(options: JobsRouterOptions): Router {
   router.get('/jobs/:id', async (req, res, next) => {
     try {
       const job = await options.store.get(req.params.id);
-      if (!job) return res.status(404).json({ success: false, code: 'JOB_NOT_FOUND', error: 'Job not found', correlationId: req.correlationId });
+      if (!job) return res.status(404).json(apiFailure('Job not found', { code: 'JOB_NOT_FOUND', correlationId: req.correlationId }));
       res.json({ success: true, data: view(job), correlationId: req.correlationId });
     } catch (err) {
       next(err);
@@ -79,7 +80,7 @@ export function createJobsRouter(options: JobsRouterOptions): Router {
     try {
       const job = await options.store.requeueDead(req.params.id, new Date());
       if (!job) {
-        return res.status(409).json({ success: false, code: 'JOB_NOT_DEAD', error: 'Only dead-lettered jobs can be retried', correlationId: req.correlationId });
+        return res.status(409).json(apiFailure('Only dead-lettered jobs can be retried', { code: 'JOB_NOT_DEAD', correlationId: req.correlationId }));
       }
       auditStore.recordEvent({
         action: 'MAINTAINER_ACTION',

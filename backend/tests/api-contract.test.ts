@@ -230,7 +230,7 @@ describe('API contract — response envelopes', () => {
     // new one is a deliberate act and must be justified in review.
     assert.deepEqual(
       API_CONTRACT.filter((e) => e.responseKind === 'raw').map((e) => e.path).sort(),
-      ['/', '/api/audit/export', '/api/exports/:id', '/api/health', '/api/metrics', '/api/ready'].sort()
+      ['/', '/api/audit/export', '/api/exports/:id', '/api/health', '/api/health/dependencies', '/api/metrics', '/api/ready'].sort()
     );
   });
 
@@ -242,6 +242,15 @@ describe('API contract — response envelopes', () => {
     assert.equal(typeof res.body.error, 'string');
     assert.ok(res.body.correlationId, 'failures must carry a correlationId for support');
     assert.equal('data' in res.body, false);
+    assert.ok(
+      Array.isArray(res.body.remediation) && res.body.remediation.length > 0,
+      'failure envelopes must carry remediation steps for the stable code (issue #303)'
+    );
+    assert.deepEqual(
+      res.body.remediation,
+      DOMAIN_ERROR_TAXONOMY[res.body.code]?.remediation,
+      'envelope remediation must match the taxonomy entry for the code'
+    );
   });
 
   it('keeps 404 envelope for unknown routes', async () => {
@@ -269,6 +278,11 @@ describe('API contract — response envelopes', () => {
     );
     assert.equal(res.body.category, DOMAIN_ERROR_TAXONOMY[res.body.code].category);
     assert.equal(res.body.retryable, DOMAIN_ERROR_TAXONOMY[res.body.code].retryable);
+    assert.deepEqual(
+      res.body.remediation,
+      DOMAIN_ERROR_TAXONOMY[res.body.code].remediation,
+      'envelope remediation must match the taxonomy entry for the code (issue #303)'
+    );
   });
 
   it('paginates list endpoints with limit, offset and total', async () => {
@@ -453,5 +467,7 @@ describe('API contract — documentation', () => {
   it('includes both success and failure examples', () => {
     assert.ok(/success/i.test(doc), 'the doc must show a success example');
     assert.ok(/"success":\s*false/.test(doc), 'the doc must show a failure example');
+    assert.ok(doc.includes('"remediation"'), 'the failure example must show remediation steps (issue #303)');
+    assert.ok(doc.includes('ERRORS.md'), 'the doc must link the error-code catalog');
   });
 });
