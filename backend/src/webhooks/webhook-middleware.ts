@@ -13,18 +13,17 @@ import type { Request, Response, NextFunction, RequestHandler } from 'express';
 import { verifyWebhookSignature, isTimestampStale, WebhookVerificationError } from './webhook-verification';
 import { MemoryReplayStore, type ReplayStore } from './replay-store';
 import type { WebhookConfig } from './types';
+import { apiFailure } from '../types/api';
 
 const HEADER_SIGNATURE = 'x-webhook-signature';
 const HEADER_TIMESTAMP = 'x-webhook-timestamp';
 const HEADER_EVENT_ID = 'x-webhook-event-id';
 
 function webhookError(res: Response, status: number, code: string, message: string): void {
-  res.status(status).json({
-    success: false,
-    error: message,
-    code,
-    timestamp: new Date().toISOString(),
-  });
+  // Route through apiFailure so webhook rejections carry the same taxonomy
+  // metadata (category, retryable, recoveryAction, remediation) as every
+  // other failure envelope (issue #303).
+  res.status(status).json(apiFailure(message, { code }));
 }
 
 export function createWebhookMiddleware(

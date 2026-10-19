@@ -13,6 +13,9 @@ export class ApiRequestError extends Error {
   code: string;
   status?: number;
   retryable: boolean;
+  category?: string;
+  recoveryAction?: string;
+  remediation?: string[];
 }
 
 export const LOCAL_API_URL: string;

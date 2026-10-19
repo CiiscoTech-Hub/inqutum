@@ -18,6 +18,9 @@ class ApiRequestError extends Error {
     this.code = options.code || 'API_REQUEST_FAILED';
     this.status = options.status;
     this.retryable = Boolean(options.retryable);
+    this.category = options.category;
+    this.recoveryAction = options.recoveryAction;
+    this.remediation = Array.isArray(options.remediation) ? options.remediation : undefined;
   }
 }
 
@@ -74,7 +77,13 @@ function toApiError(error) {
       cause: error,
       code: responseData?.code,
       status,
-      retryable: status === 408 || status === 429,
+      retryable:
+        typeof responseData?.retryable === 'boolean'
+          ? responseData.retryable
+          : status === 408 || status === 429,
+      category: responseData?.category,
+      recoveryAction: responseData?.recoveryAction,
+      remediation: responseData?.remediation,
     }
   );
 }

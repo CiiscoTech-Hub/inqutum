@@ -20,6 +20,7 @@ export interface VerificationFailure {
   code: VerificationCode;
   error: string;
   recoveryAction?: string;
+  remediation?: string[];
 }
 
 export interface VerificationSuccess<T> {
@@ -40,11 +41,13 @@ export interface UserSafeErrorDetails {
   category: string;
   retryable: boolean;
   recoveryAction: string;
+  remediation: string[];
   correlationId?: string;
 }
 
 export const VERIFICATION_MESSAGES: Record<VerificationCode, string>;
 export const RECOVERY_ACTIONS: Record<VerificationCode, string>;
+export const REMEDIATION: Record<VerificationCode, string[]>;
 
 export function failure(code: VerificationCode): VerificationFailure;
 

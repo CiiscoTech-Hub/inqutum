@@ -33,6 +33,7 @@
     "test:load:cardinality": "tsx ../scripts/load-cardinality-burst.ts",
     "export:trends": "tsx ../scripts/export-trends.ts",
     "policy:simulate": "tsx ../scripts/simulate-policy.ts",
+    "errors:catalog": "tsx scripts/generate-error-catalog.ts",
     "typecheck": "tsc --noEmit"
   },
   "engines": {

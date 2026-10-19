@@ -2,6 +2,7 @@ import { Router } from 'express';
 import type { JobStore } from '../jobs/job-types';
 import type { InvoiceStorage } from '../storage/invoice-storage';
 import { metrics } from '../observability/telemetry';
+import { apiFailure } from '../types/api';
 import { buildOpsHealthReport } from '../ops/ops-health';
 import { requireAdmin } from './jobs.routes';
 import {
@@ -179,7 +180,7 @@ export function createOpsRouter(options: OpsRouterOptions): Router {
   }
 
   const fail = (res: any, req: any, status: number, code: string, error: string) =>
-    res.status(status).json({ success: false, code, error, correlationId: req.correlationId });
+    res.status(status).json(apiFailure(error, { code, correlationId: req.correlationId }));
 
   // -- External dependency degradation matrix --------------------------------
 
@@ -517,11 +518,11 @@ export function createOpsRouter(options: OpsRouterOptions): Router {
       const report = await replay.replay({ dryRun, projectorVersion: version });
       if (report.outcome === 'refused') {
         return res.status(409).json({
-          success: false,
-          code: 'REPLAY_REFUSED',
-          error: `Replay not applied: ${report.reasons.join('; ')}`,
+          ...apiFailure(`Replay not applied: ${report.reasons.join('; ')}`, {
+            code: 'REPLAY_REFUSED',
+            correlationId: req.correlationId,
+          }),
           data: report,
-          correlationId: req.correlationId,
         });
       }
       if (report.outcome === 'applied') {
@@ -696,12 +697,10 @@ export function createOpsRouter(options: OpsRouterOptions): Router {
   router.post('/ops/impersonation', admin, (req, res) => {
     const target = stellarPublicKeySchema.safeParse(req.body?.targetId);
     if (!target.success) {
-      return res.status(400).json({
-        success: false,
+      return res.status(400).json(apiFailure('targetId must be a valid Stellar public key', {
         code: 'TARGET_INVALID',
-        error: 'targetId must be a valid Stellar public key',
         correlationId: req.correlationId,
-      });
+      }));
     }
 
     const permissions = (req.body?.permissions ?? ['read']) as ImpersonationPermission[];
@@ -722,12 +721,10 @@ export function createOpsRouter(options: OpsRouterOptions): Router {
         correlationId: req.correlationId,
       });
     } catch (err) {
-      return res.status(400).json({
-        success: false,
+      return res.status(400).json(apiFailure(err instanceof Error ? err.message : 'Impersonation session rejected', {
         code: 'IMPERSONATION_REJECTED',
-        error: err instanceof Error ? err.message : 'Impersonation session rejected',
         correlationId: req.correlationId,
-      });
+      }));
     }
   });
 
@@ -738,12 +735,10 @@ export function createOpsRouter(options: OpsRouterOptions): Router {
       req.body?.maintainerId ? String(req.body.maintainerId) : undefined,
     );
     if (!closed) {
-      return res.status(404).json({
-        success: false,
+      return res.status(404).json(apiFailure('No active session with that id for this maintainer', {
         code: 'SESSION_NOT_FOUND',
-        error: 'No active session with that id for this maintainer',
         correlationId: req.correlationId,
-      });
+      }));
     }
     return res.json({ success: true, data: { sessionId, closed: true }, correlationId: req.correlationId });
   });

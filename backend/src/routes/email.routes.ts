@@ -31,53 +31,48 @@ const webhookSchema = z.object({
   reason: z.string().max(500).optional(),
 });
 
-/** Failure categories map to stable codes so the UI can give specific advice. */
-const FAILURE_CODES: Record<string, { status: number; code: string; recovery: string }> = {
+/**
+ * Failure categories map to stable codes so the UI can give specific advice.
+ * `category`, `retryable` and `recoveryAction` are no longer repeated here:
+ * `sendFailure` resolves them (plus the `remediation` steps) from
+ * `DOMAIN_ERROR_TAXONOMY`, which is the single source for that metadata.
+ */
+const FAILURE_CODES: Record<string, { status: number; code: string }> = {
   auth: {
     status: 502,
     code: 'EMAIL_AUTH_FAILED',
-    recovery: 'The email provider rejected our credentials. A maintainer must fix the provider API key or SMTP username.',
   },
   quota: {
     status: 429,
     code: 'EMAIL_QUOTA_EXCEEDED',
-    recovery: 'The email provider is rate limiting or out of quota. Try again later or upgrade the sending plan.',
   },
   transient: {
     status: 503,
     code: 'EMAIL_TRANSIENT_FAILURE',
-    recovery: 'The email provider is temporarily unreachable. Try again in a few minutes.',
   },
   invalid_recipient: {
     status: 400,
     code: 'EMAIL_INVALID_RECIPIENT',
-    recovery: 'Check the recipient address and try again.',
   },
   config: {
     status: 503,
     code: 'EMAIL_NOT_CONFIGURED',
-    recovery: 'Email delivery is not configured for this deployment. See docs/EMAIL_DELIVERY.md.',
   },
   in_progress: {
     status: 409,
     code: 'EMAIL_SEND_IN_PROGRESS',
-    recovery: 'A send with this idempotency key is still running. Retry in a moment to get its result.',
   },
   in_doubt: {
     status: 409,
     code: 'EMAIL_OUTCOME_IN_DOUBT',
-    recovery:
-      'A previous send stopped before its outcome was recorded. Check the provider log, then resolve the checkpoint (docs/RECOVERY_CHECKPOINTS.md).',
   },
   key_reused: {
     status: 422,
     code: 'EMAIL_IDEMPOTENCY_KEY_REUSED',
-    recovery: 'This idempotency key was already used for a different email. Use a new key for a new message.',
   },
   permanent: {
     status: 502,
     code: 'EMAIL_FAILED',
-    recovery: 'The email provider rejected this message. Check the address and content, then try again.',
   },
 };
 
@@ -137,14 +132,6 @@ export function createEmailRouter(options: EmailRouterOptions = {}): Router {
     const mapping = FAILURE_CODES[result.category ?? 'permanent'] ?? FAILURE_CODES.permanent;
     return sendFailure(res, mapping.status, result.message ?? 'Email delivery failed', {
       code: mapping.code,
-      category:
-        result.category === 'quota'
-          ? 'RATE_LIMIT'
-          : result.category === 'in_progress' || result.category === 'in_doubt' || result.category === 'key_reused'
-            ? 'LIFECYCLE'
-            : 'NETWORK',
-      retryable: result.retryable ?? false,
-      recoveryAction: mapping.recovery,
       correlationId: req.correlationId,
     });
   });

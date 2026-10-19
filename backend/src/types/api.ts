@@ -39,6 +39,8 @@ export interface ApiFailure {
   category?: ErrorCategory;
   retryable?: boolean;
   recoveryAction?: string;
+  /** Ordered remediation steps for the code (issue #303); see docs/ERRORS.md. */
+  remediation?: string[];
   correlationId?: string;
   timestamp?: string;
 }
@@ -87,6 +89,7 @@ export function apiFailure(
     category: extra?.category || taxonomy?.category,
     retryable: extra?.retryable !== undefined ? extra.retryable : taxonomy?.retryable,
     recoveryAction: extra?.recoveryAction || taxonomy?.recoveryAction,
+    ...(taxonomy?.remediation?.length ? { remediation: taxonomy.remediation } : {}),
     ...(extra?.correlationId ? { correlationId: extra.correlationId } : {}),
     timestamp: new Date().toISOString(),
   };
@@ -158,6 +161,7 @@ export function sendVerificationFailure(
           category: taxonomy.category,
           retryable: taxonomy.retryable,
           recoveryAction: taxonomy.recoveryAction,
+          ...(taxonomy.remediation?.length ? { remediation: taxonomy.remediation } : {}),
         }
       : {}),
     ...(corrId ? { correlationId: corrId } : {}),
