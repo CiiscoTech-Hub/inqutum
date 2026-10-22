@@ -132,3 +132,78 @@ test('mirrors remediation steps for every verification code (issue #303)', () =>
   const preContract = resolveUserSafeError({ response: { data: { error: 'legacy' } } });
   assert.deepEqual(preContract.remediation, []);
 });
+
+// ─── Issue #181 — hardened contract regression tests ─────────────────────────
+
+test('success path: checkTxHash returns ok:true and the normalised value', () => {
+  const hash = 'deadbeef'.repeat(8);
+  const result = checkTxHash(hash);
+  assert.equal(result.ok, true);
+  assert.equal(result.value, hash);
+});
+
+test('success path: checkPayerInfo with no optional fields is ok', () => {
+  const result = checkPayerInfo({});
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.value, { payerName: undefined, payerEmail: undefined });
+});
+
+test('success path: checkPayerInfo accepts undefined input', () => {
+  const result = checkPayerInfo(undefined);
+  assert.equal(result.ok, true);
+});
+
+test('validation: TRANSACTION_NOT_FOUND is flagged retryable', () => {
+  const err = { response: { data: { code: 'TRANSACTION_NOT_FOUND' } } };
+  const details = resolveUserSafeError(err);
+  assert.equal(details.retryable, true);
+  assert.equal(details.code, 'TRANSACTION_NOT_FOUND');
+});
+
+test('validation: non-retryable code is not marked retryable', () => {
+  const err = { response: { data: { code: 'INVOICE_ALREADY_PAID' } } };
+  const details = resolveUserSafeError(err);
+  assert.equal(details.retryable, false);
+});
+
+test('degraded dependency: resolveVerificationError handles missing response gracefully', () => {
+  assert.doesNotThrow(() => resolveVerificationError(null));
+  assert.doesNotThrow(() => resolveVerificationError(undefined));
+  assert.equal(resolveVerificationError(null), 'Verification failed');
+});
+
+test('degraded dependency: resolveUserSafeError handles null error without throwing', () => {
+  assert.doesNotThrow(() => resolveUserSafeError(null));
+  const result = resolveUserSafeError(null);
+  assert.equal(typeof result.message, 'string');
+  assert.equal(typeof result.recoveryAction, 'string');
+  assert.ok(Array.isArray(result.remediation));
+});
+
+test('degraded dependency: correlationId is forwarded when present', () => {
+  const err = {
+    response: { data: { code: 'MEMO_MISMATCH', correlationId: 'corr-abc-123' } },
+  };
+  const result = resolveUserSafeError(err);
+  assert.equal(result.correlationId, 'corr-abc-123');
+});
+
+test('degraded dependency: server retryable flag overrides client default', () => {
+  const err = {
+    response: { data: { code: 'TRANSACTION_NOT_FOUND', retryable: false } },
+  };
+  const result = resolveUserSafeError(err);
+  assert.equal(result.retryable, false);
+});
+
+test('validation: payer name with only whitespace is treated as absent', () => {
+  const result = checkPayerInfo({ payerName: '   ' });
+  assert.equal(result.ok, true);
+  assert.equal(result.value.payerName, undefined);
+});
+
+test('validation: payer email with only whitespace is treated as absent', () => {
+  const result = checkPayerInfo({ payerEmail: '   ' });
+  assert.equal(result.ok, true);
+  assert.equal(result.value.payerEmail, undefined);
+});
